@@ -1,0 +1,2726 @@
+# -*- org-confirm-babel-evaluate: nil -*- 
+#+author:      Thomas P. Harte
+#+title:       ~bm~: Benchmarker for Disk Operations
+#+email:       tpharte@gmail.com
+#+property:      :tangle yes :exports code :results output
+#+html_mathjax:  align:"left" path:"https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-MML-AM_CHTML"
+#+html_head:     <link rel="stylesheet" type="text/css" href="github.css"/>
+#+infojs_opt:    view: info toc:t
+
+#+latex_class:   review
+#+latex_header:  \usepackage{minted}
+#+latex_header:  \usemintedstyle{emacs}
+#+options:       tex:imagemagick
+#+include:       /home/tharte/dot/include/newcommands.tex src latex
+#+bind:          org-latex-image-default-width 0.5\linewidth $
+#+bind:          org-latex-prefer-user-labels t
+
+#+startup:       overview
+
+Just a reference (for Bibtex): \cite{Baxter-Rennie:96}.
+
+* set-up                                                           :noexport:
+** bash
+#+begin_src bash :session *bash* :exports both :results output :eval no
+root=/home/tharte/dot/projects/problems && cd $root
+#+end_src 
+
+* C/C++
+** benchmarking : how fast can i read/write to/from an SSD?
+*** thesis
+Points:
+
+- summary
+
+  + ~cp~: the thesis is that ~cp~ has to be (almost?) the fastest way to copy bytes
+    (see: https://unix.stackexchange.com/questions/79751/is-there-a-faster-alternative-to-cp-for-copying-large-files-20-gb)
+    
+    - ~dd~: doesn't cut it (or certainly not ~dd if=/dev/urandom~, possibly because ~/dev/urandom~ takes resources to produce?)
+
+    - ~rsync~: doesn't cut it
+
+  + if we can write C/C++ that can write FIX messages to disk about as fast as ~cp~, then we
+    know that we're approaching max throughput
+
+- summary table of results
+
+  #+attr_html: :align center :rules group :border 2
+  | command                                                                 | host  | env  | disk type |  time | throughput | throughput | file size | file size |
+  |                                                                         |       |      |           |   (s) |  (lines/s) |  (bytes/s) |   (lines) |   (bytes) |
+  | <l>                                                                     |       |      |           |   <r> |        <r> |        <r> |       <r> |       <r> |
+  |-------------------------------------------------------------------------+-------+------+-----------+-------+------------+------------+-----------+-----------|
+  | cp                                                                      | hippo | PROD |           | 0.390 |            |            |           |           |
+  |                                                                         |       |      |           | 0.364 |            |            |           |           |
+  |                                                                         |       |      |           | 0.387 |            |            |           |           |
+  |                                                                         |       |      |           | 0.362 |            |            |           |           |
+  |                                                                         |       |      |           | 0.359 |            |            |           |           |
+  |-------------------------------------------------------------------------+-------+------+-----------+-------+------------+------------+-----------+-----------|
+  | dd if=/dev/urandom of=$folder/o.bin bs=416M count=1 iflag=fullblock     | hippo | PROD |           | 1.316 |            |            |           |           |
+  |                                                                         |       |      |           | 1.452 |            |            |           |           |
+  |                                                                         |       |      |           | 1.447 |            |            |           |           |
+  |                                                                         |       |      |           | 1.439 |            |            |           |           |
+  |                                                                         |       |      |           | 1.541 |            |            |           |           |
+  |-------------------------------------------------------------------------+-------+------+-----------+-------+------------+------------+-----------+-----------|
+  | dd if=$folder/test.log of=$folder/o.bin bs=416M count=1 iflag=fullblock |       |      |           | 0.526 |            |            |           |           |
+  |                                                                         |       |      |           | 0.569 |            |            |           |           |
+  |                                                                         |       |      |           | 0.523 |            |            |           |           |
+  |                                                                         |       |      |           | 0.544 |            |            |           |           |
+  |                                                                         |       |      |           | 0.549 |            |            |           |           |
+  |-------------------------------------------------------------------------+-------+------+-----------+-------+------------+------------+-----------+-----------|
+  | ./bm write -i test.log -o o.log -w write_c                              | hippo | PROD |           | 0.471 |            |            |           |           |
+  |                                                                         |       |      |           | 0.467 |            |            |           |           |
+  |                                                                         |       |      |           | 0.472 |            |            |           |           |
+  |                                                                         |       |      |           | 0.467 |            |            |           |           |
+  |                                                                         |       |      |           | 0.469 |            |            |           |           |
+
+- set-up
+  
+  + bash
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    folder=/home/tharte/dot/projects/problems/src/c++/benchmarking
+    #+end_src
+
+    #+RESULTS:
+
+- create large file with FIX messages
+  
+  + stock of FIX messages
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    filename=/home/tharte/dot/finance/fixed-income/trading/fix/data/fix-samples.txt
+
+    cp -p $filename $folder && cat $folder/fix-samples.txt | grep '^8=' | wc -l
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : tharte@niknak:~/dot/projects/problems$ 9
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    filename=$folder/fix-samples.txt
+
+    cat $filename | grep '^8=' > $folder/fix.log 
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : tharte@niknak:~/dot/projects/problems$ 9 fix.log
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    filename=$folder/fix.log
+
+    # remove RFQ and the demultiplexed ICE messages
+    cat $filename | grep -vE '35=R|34=127471177|34=127471178|34=127471179' > $folder/fix2.log && mv $folder/fix2.log $filename
+    #+end_src
+
+    #+RESULTS:
+
+  + replicate & number lines [i later removed this file: numbering the FIX messages is not necessary]
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    filename=$folder/fix.log
+    out=$folder/test.log
+    out2=$folder/test2.log
+
+    seq 200000 | xargs -i cat $filename > $out  # takes about a minute
+    sed = $out | sed 'N;s/\n/:/' > $out2
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : tharte@niknak:~/dot/projects/problems$ 1000000
+
+  + we now have a numbered, million-line file ~test2.log~
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    cat $folder/test2.log | wc -l
+    #+end_src
+
+    #+RESULTS:
+    : 1000000
+
+- ~dd~ - for comparison
+
+  + use ~if=/dev/urandom~ (whita's run with ~nohup~) to create ~o.bin~
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    ls -lh $folder/test.log
+    #+end_src
+
+    #+RESULTS:
+    : -rw-rw-r-- 1 tharte tharte 416M Oct 15 12:38 /home/tharte/dot/projects/problems/src/c++/benchmarking/test.log
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    time dd if=/dev/urandom of=$folder/o.bin bs=416M count=1 iflag=fullblock &> dd.txt && cat dd.txt
+    #+end_src
+
+    #+RESULTS:
+    : real	0m1.502s
+    : user	0m0.000s
+    : sys	0m1.481s
+    : 1+0 records in
+    : 1+0 records out
+    : 436207616 bytes (436 MB, 416 MiB) copied, 1.40405 s, 311 MB/s
+
+  + use ~dd~ to byte-copy ~if=o.bin~ to ~of=oo.bin~ >= 2x speed of using ~if=/dev/urandom~
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    time dd if=$folder/o.bin of=$folder/oo.bin bs=416M count=1 iflag=fullblock &>dd2.txt && cat dd2.txt
+    #+end_src
+
+    #+RESULTS:
+    : real	0m0.435s
+    : user	0m0.001s
+    : sys	0m0.434s
+    : 1+0 records in
+    : 1+0 records out
+    : 436207616 bytes (436 MB, 416 MiB) copied, 0.414223 s, 1.1 GB/s
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    diff $folder/o.bin $folder/oo.bin | wc -l
+    #+end_src
+
+    #+RESULTS:
+    : 0
+
+  + use ~dd~ to byte-copy ~if=test.log~ 
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    ls -lh $folder/test.log
+    #+end_src
+
+    #+RESULTS:
+    : -rw-rw-r-- 1 tharte tharte 416M Oct 15 08:38 /home/tharte/dot/projects/problems/src/c++/benchmarking/test.log
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    time dd if=$folder/test.log of=$folder/o.log bs=416M count=1 iflag=fullblock &>dd.txt && cat dd.txt
+    #+end_src
+
+    #+RESULTS:
+    : real	0m0.424s
+    : user	0m0.002s
+    : sys	0m0.423s
+    : 0+1 records in
+    : 0+1 records out
+    : 436000000 bytes (436 MB, 416 MiB) copied, 0.403296 s, 1.1 GB/s
+
+  + ~if=o.bin~, ~of=oo.bin~ (direct copy)
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    time dd if=$folder/o.bin of=$folder/oo.bin bs=416M count=1 iflag=fullblock &>dd2.txt && cat dd2.txt
+    #+end_src
+
+    #+RESULTS:
+    : real	0m0.563s
+    : user	0m0.001s
+    : sys	0m0.562s
+    : 1+0 records in
+    : 1+0 records out
+    : 436207616 bytes (436 MB, 416 MiB) copied, 0.466418 s, 935 MB/s
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    diff $folder/o.bin $folder/oo.bin | wc -l
+    #+end_src
+
+    #+RESULTS:
+    : 0
+
+  + loop test (use ~$folder/test.log~)
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    n=5
+    sleep_for=1
+    for i in $(seq $n); do
+        time dd if=/dev/urandom of=$folder/o.bin bs=416M count=1 iflag=fullblock 
+        sleep $sleep_for
+    done
+    #+end_src
+
+    #+RESULTS:
+    #+begin_example
+    1+0 records in
+    1+0 records out
+    436207616 bytes (436 MB, 416 MiB) copied, 1.29587 s, 337 MB/s
+
+    real	0m1.316s
+    user	0m0.000s
+    sys	        0m1.316s
+    1+0 records in
+    1+0 records out
+    436207616 bytes (436 MB, 416 MiB) copied, 1.36397 s, 320 MB/s
+
+    real	0m1.452s
+    user	0m0.001s
+    sys	        0m1.451s
+    1+0 records in
+    1+0 records out
+    436207616 bytes (436 MB, 416 MiB) copied, 1.36509 s, 320 MB/s
+
+    real	0m1.447s
+    user	0m0.000s
+    sys	        0m1.446s
+    1+0 records in
+    1+0 records out
+    436207616 bytes (436 MB, 416 MiB) copied, 1.36254 s, 320 MB/s
+
+    real	0m1.439s
+    user	0m0.001s
+    sys	        0m1.438s
+    1+0 records in
+    1+0 records out
+    436207616 bytes (436 MB, 416 MiB) copied, 1.36971 s, 318 MB/s
+
+    real	0m1.541s
+    user	0m0.001s
+    sys	        0m1.540s
+    #+end_example
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    n=5
+    sleep_for=1
+    for i in $(seq $n); do
+        time dd if=$folder/test.log of=$folder/o.log bs=416M count=1 iflag=fullblock 
+        sleep $sleep_for
+    done
+    #+end_src
+
+    #+RESULTS:
+    #+begin_example
+    0+1 records in
+    0+1 records out
+    436000000 bytes (436 MB, 416 MiB) copied, 0.495756 s, 879 MB/s
+
+    real	0m0.526s
+    user	0m0.002s
+    sys	        0m0.523s
+    0+1 records in
+    0+1 records out
+    436000000 bytes (436 MB, 416 MiB) copied, 0.477977 s, 912 MB/s
+
+    real	0m0.569s
+    user	0m0.001s
+    sys	        0m0.568s
+    0+1 records in
+    0+1 records out
+    436000000 bytes (436 MB, 416 MiB) copied, 0.434941 s, 1.0 GB/s
+
+    real	0m0.523s
+    user	0m0.000s
+    sys	        0m0.523s
+    0+1 records in
+    0+1 records out
+    436000000 bytes (436 MB, 416 MiB) copied, 0.468141 s, 931 MB/s
+
+    real	0m0.544s
+    user	0m0.001s
+    sys	        0m0.527s
+    0+1 records in
+    0+1 records out
+    436000000 bytes (436 MB, 416 MiB) copied, 0.467743 s, 932 MB/s
+
+    real	0m0.549s
+    user	0m0.001s
+    sys	        0m0.548s
+    #+end_example
+
+- ~cp~ - the thesis is that ~cp~ has to be (almost?) the fastest way to copy bytes
+
+  + refs
+
+    - see: https://unix.stackexchange.com/questions/79751/is-there-a-faster-alternative-to-cp-for-copying-large-files-20-gb
+    
+  + ~cp test2.log o.log~
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    ls -alFh $folder/test.log
+    #+end_src
+
+    #+RESULTS:
+    : -rw-rw-r-- 1 tharte tharte 416M Oct 15 08:38 /home/tharte/dot/projects/problems/src/c++/benchmarking/test.log
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    time cp -p $folder/test.log $folder/o.log 
+    #+end_src
+
+    #+RESULTS:
+    : real	0m0.374s
+    : user	0m0.000s
+    : sys	0m0.372s
+
+    #+begin_src python :session *Python-3.x* :exports both :results output :eval yes
+    print( f"~{416 / 0.374:.0f} MB/s" )
+    #+end_src
+
+    #+RESULTS:
+    : ~1112 MB/s
+
+  + ~cp o.bin oo.bin~ (no difference from text file ~$folder/test.log~)
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    time cp -p $folder/o.bin $folder/oo.bin 
+    #+end_src
+
+    #+RESULTS:
+    : real	0m0.385s
+    : user	0m0.000s
+    : sys	0m0.385s
+
+  + loop test (use ~$folder/test.log~)
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    n=5
+    sleep_for=1
+    for i in $(seq $n); do
+        # time cp -p $folder/test.log $folder/o.log 2>&1 | grep real
+        time cp -p $folder/test.log $folder/o.log 
+        sleep $sleep_for
+    done
+    #+end_src
+
+    #+RESULTS:
+    #+begin_example
+    real	0m0.390s
+    user	0m0.001s
+    sys	        0m0.390s
+
+    real	0m0.364s
+    user	0m0.001s
+    sys	        0m0.363s
+
+    real	0m0.387s
+    user	0m0.000s
+    sys	        0m0.386s
+
+    real	0m0.362s
+    user	0m0.000s
+    sys	        0m0.360s
+
+    real	0m0.359s
+    user	0m0.003s
+    sys	        0m0.357s
+    #+end_example
+
+- ~bm~ - as close to ~cp~ for copying actual FIX messages
+
+  + loop test (use ~$folder/test.log~)
+
+    we need to ignore the time it takes to read in ~$folder/test.log~ and focus
+    on the output ~write_c~ (/i.e./ the time it takes to perform the actual write)
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    n=5
+    sleep_for=1
+    for i in $(seq $n); do
+        time $folder/bm write -i $folder/test.log -o $folder/o.log -w write_c
+        sleep $sleep_for
+    done
+    #+end_src
+
+    #+RESULTS:
+    #+begin_example
+    Runner::Runner:
+    Config: subcommand='write'
+    Config: wfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/o.log'
+    Config: wfunction='write_c'
+    Config: wnthreads=NO THREADS
+    Config: wnlines=AS FAST AS POSSIBLE
+    Config: rfunction='read_c_nlines'
+    Config: rfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/test.log'
+    Config: rnthreads=NO THREADS
+    Config: rnlines=ALL
+    Config: sleep_for=0 microseconds
+
+    write_c: 471 ms
+    Runner::write duration: 471 ms
+
+    real	0m1.018s
+    user	0m0.381s
+    sys	0m0.637s
+    Runner::Runner:
+    Config: subcommand='write'
+    Config: wfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/o.log'
+    Config: wfunction='write_c'
+    Config: wnthreads=NO THREADS
+    Config: wnlines=AS FAST AS POSSIBLE
+    Config: rfunction='read_c_nlines'
+    Config: rfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/test.log'
+    Config: rnthreads=NO THREADS
+    Config: rnlines=ALL
+    Config: sleep_for=0 microseconds
+
+    write_c: 467 ms
+    Runner::write duration: 467 ms
+
+    real	0m1.001s
+    user	0m0.347s
+    sys	0m0.653s
+    Runner::Runner:
+    Config: subcommand='write'
+    Config: wfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/o.log'
+    Config: wfunction='write_c'
+    Config: wnthreads=NO THREADS
+    Config: wnlines=AS FAST AS POSSIBLE
+    Config: rfunction='read_c_nlines'
+    Config: rfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/test.log'
+    Config: rnthreads=NO THREADS
+    Config: rnlines=ALL
+    Config: sleep_for=0 microseconds
+
+    write_c: 472 ms
+    Runner::write duration: 472 ms
+
+    real	0m1.002s
+    user	0m0.383s
+    sys	0m0.620s
+    Runner::Runner:
+    Config: subcommand='write'
+    Config: wfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/o.log'
+    Config: wfunction='write_c'
+    Config: wnthreads=NO THREADS
+    Config: wnlines=AS FAST AS POSSIBLE
+    Config: rfunction='read_c_nlines'
+    Config: rfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/test.log'
+    Config: rnthreads=NO THREADS
+    Config: rnlines=ALL
+    Config: sleep_for=0 microseconds
+
+    write_c: 467 ms
+    Runner::write duration: 467 ms
+
+    real	0m0.997s
+    user	0m0.385s
+    sys	0m0.612s
+    Runner::Runner:
+    Config: subcommand='write'
+    Config: wfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/o.log'
+    Config: wfunction='write_c'
+    Config: wnthreads=NO THREADS
+    Config: wnlines=AS FAST AS POSSIBLE
+    Config: rfunction='read_c_nlines'
+    Config: rfilename='/home/tharte/dot/projects/problems/src/c++/benchmarking/test.log'
+    Config: rnthreads=NO THREADS
+    Config: rnlines=ALL
+    Config: sleep_for=0 microseconds
+
+    write_c: 469 ms
+    Runner::write duration: 469 ms
+
+    real	0m1.001s
+    user	0m0.372s
+    sys	0m0.628s
+    #+end_example
+
+- clean up
+
+  + bin files
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    rm -f $folder/o.bin $folder/oo.bin $folder/o.log
+    #+end_src
+
+    #+RESULTS:
+
+*** c/c++ experimentation
+Points:
+
+- set-up
+  
+  + bash
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    folder=/home/tharte/dot/projects/problems/src/c++/benchmarking
+    #+end_src
+
+- create large file with FIX messages
+  
+  + stock of FIX messages
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    filename=/home/tharte/dot/finance/fixed-income/trading/fix/data/fix-samples.txt
+
+    cp -p $filename $folder && cat $folder/fix-samples.txt | grep '^8=' | wc -l
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : tharte@niknak:~/dot/projects/problems$ 9
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    filename=$folder/fix-samples.txt
+
+    cat $filename | grep '^8=' > $folder/fix.log 
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : tharte@niknak:~/dot/projects/problems$ 9 fix.log
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    filename=$folder/fix.log
+
+    # remove RFQ and the demultiplexed ICE messages
+    cat $filename | grep -vE '35=R|34=127471177|34=127471178|34=127471179' > $folder/fix2.log && mv $folder/fix2.log $filename
+    #+end_src
+
+    #+RESULTS:
+
+  + replicate & number lines [i later removed this file: numbering the FIX messages is not necessary]
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    filename=$folder/fix.log
+    out=$folder/test.log
+    out2=$folder/test2.log
+
+    seq 200000 | xargs -i cat $filename > $out  # takes about a minute
+    sed = $out | sed 'N;s/\n/:/' > $out2
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : tharte@niknak:~/dot/projects/problems$ 1000000
+
+  + we now have a numbered, million-line file ~test2.log~
+
+    #+begin_src bash :session *bash* :exports both :results output :eval no
+    cat $folder/test2.log | wc -l
+    #+end_src
+
+    #+RESULTS:
+    : 1000000
+
+- read/write - separate out the read from the write (read into ~std::vector~)
+
+  + C++: read FIX, write with ~cout <<~, redirect output to file 
+
+    #+begin_src C++ :exports both :results output :eval no :tangle ./src/c++/benchmarking/run.cpp
+    #include "utils.h"
+
+    Timer t = Timer(std::cerr);
+
+    void usage(char* argv[]) {
+        cerr << "usage:\n\tbash$ " << argv[0] << " input-filename" << endl;
+        exit(1);
+    }
+
+    std::vector<string> read(string const& filename) {
+        ifstream fi(filename);
+        string line;
+        std::vector<string> array;
+        while (getline(fi, line)) {
+            array.push_back(line);
+        }
+
+        return array;
+    }
+
+    void write(string const& filename) {
+        t.start("read duration: ");
+        std::vector<string> array = std::move(read(filename));
+        t.stop();
+
+        t.start("write duration: ");
+        for_each(array.begin(), array.end(), [](string line) -> void {
+            cout << line << endl;
+        });
+        t.stop();
+    }
+
+    int main(int argc, char* argv[]) {
+        // Source: https://en.cppreference.com/w/cpp/io/ios_base/sync_with_stdio
+        // makes no difference whatsoever:
+        std::ios_base::sync_with_stdio(false);
+        cin.tie(NULL);
+
+        if (argc != 2) usage(argv);
+
+        string ifilename = argv[1];
+        if (!file_exists(ifilename)) {
+            cerr << "error:\tfilename '" << ifilename << "' does not exist" << endl;;
+            exit(1);
+        }
+
+        cerr << Timer::now() << endl;
+        write(ifilename);
+
+        return 0;
+    }
+    #+end_src
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    g++ run.cpp -o run -I.
+    echo '-------------'
+    ./run 
+    echo '-------------'
+    ./run test2.log > o.log
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : -------------
+    : usage:
+    : ./run input-filename
+    : -------------
+    : 2024-10-15 21:45:19.887594686 (UTC+0)
+    : read duration: 470 ms
+    : write duration: 1810 ms
+
+  + C: read FIX, write with ~printf~, redirect output to file
+
+    #+begin_src C++ :exports both :results output :eval no :tangle ./src/c++/benchmarking/runc.cpp
+    #include "utils.h"
+
+    Timer t = Timer(std::cerr);
+
+    void usage(char* argv[]) {
+        cerr << "usage:\n\tbash$ " << argv[0] << " input-filename" << endl;
+        exit(1);
+    }
+
+    std::vector<string> read(string const& ifilename) {
+        FILE* fi = fopen(ifilename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        while ((getline(&line, &len, fi)) != -1) {
+            array.push_back(line);
+        }
+        fclose(fi);
+        if (line) free(line);
+
+        return array;
+    }
+
+    void write(string const& ifilename) {
+        t.start("read duration: ");
+        std::vector<string> array = std::move(read(ifilename));
+        t.stop();
+
+        t.start("write duration: ");
+        for (size_t i=0; i<array.size(); ++i) {
+            printf("%s", array[i].c_str());
+        }
+        t.stop();
+    }
+
+    int main(int argc, char* argv[]) {
+        if (argc != 2) usage(argv);
+
+        string ifilename = argv[1];
+        if (!file_exists(ifilename)) {
+            cerr << "error:\tinput-filename '" << ifilename << "' does not exist" << endl;;
+            exit(1);
+        }
+
+        cerr << Timer::now() << endl;
+        write(ifilename);
+
+        return 0;
+    }
+    #+end_src
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    g++ runc.cpp -o runc -I.
+    echo '-------------'
+    ./runc 
+    echo '-------------'
+    ./runc test2.log > o.log
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : -------------
+    : usage:
+    : ./runc input-filename
+    : -------------
+    : 2024-10-15 21:46:05.435557585 (UTC+0)
+    : read duration: 491 ms
+    : write duration: 391 ms
+
+  + C++: read FIX, write to file with ~ofstream~ 
+
+    #+begin_src C++ :exports both :results output :eval no :tangle ./src/c++/benchmarking/run.cpp
+    #include "utils.h"    
+
+    Timer t = Timer();
+
+    void usage(char* argv[]) {
+        cerr << "usage:\n\tbash$ " << argv[0] << " input-filename output-filename" << endl;
+        exit(1);
+    }
+
+    std::vector<string> read(string const& filename) {
+        ifstream fi(filename);
+        string line;
+        std::vector<string> array;
+        while (getline(fi, line)) {
+            array.push_back(line);
+        }
+
+        return array;
+    }
+
+    void write(string const& ifilename, string const& ofilename) {
+        t.start("read duration: ");
+        std::vector<string> array = std::move(read(ifilename));
+        t.stop();
+
+        ofstream fo; fo.open(ofilename);
+
+        t.start("write duration: ");
+        for (size_t i=0; i<array.size(); ++i) {
+            fo << array[i] << endl;
+        }
+        fo.close();
+        t.stop();
+    }
+
+    int main(int argc, char* argv[]) {
+        // Source: https://en.cppreference.com/w/cpp/io/ios_base/sync_with_stdio
+        // makes no difference whatsoever:
+        std::ios_base::sync_with_stdio(false);
+        cin.tie(NULL);
+
+        if (argc != 3) usage(argv);
+
+        string ifilename = argv[1];
+        string ofilename = argv[2];
+        if (!file_exists(ifilename)) {
+            cerr << "error:\tifilename '" << ifilename << "' does not exist" << endl;;
+            exit(1);
+        }
+
+        cout << Timer::now() << endl;
+        write(ifilename, ofilename);
+
+        return 0;
+    }
+    #+end_src
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    g++ run.cpp -o run -I.
+    echo '-------------'
+    ./run 
+    echo '-------------'
+    ./run test2.log o.log
+    #+end_src
+
+    #+RESULTS:
+    : 
+    : -------------
+    : usage:
+    : ./run input-filename output-filename
+    : -------------
+    : 2024-10-15 21:44:33.016806695 (UTC+0)
+    : read duration: 405 ms
+    : write duration: 1783 ms
+
+  + C: read FIX, write to file with ~fprintf~ 
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I. :tangle ./src/c++/benchmarking/runc.cpp
+    #include "utils.h"    
+
+    Timer t = Timer(std::cerr);
+
+    void usage(char* argv[]) {
+        cerr << "usage:\n\tbash$ " << argv[0] << " input-filename output-filename" << endl;
+        exit(1);
+    }
+
+    std::vector<string> read(string const& ifilename) {
+        FILE* fi = fopen(ifilename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        while ((getline(&line, &len, fi)) != -1) {
+            array.push_back(line);
+        }
+        fclose(fi);
+        if (line) free(line);
+
+        return array;
+    }
+
+    void write(string const& ifilename, string const& ofilename) {
+        t.start("read duration: ");
+        std::vector<string> array = std::move(read(ifilename));
+        t.stop();
+
+        t.start("write duration: ");
+        FILE* fo = fopen(ofilename.c_str(), "w");
+        for (size_t i=0; i<array.size(); ++i) {
+            fprintf(fo, "%s", array[i].c_str());
+        }
+        fclose(fo);
+        t.stop();
+    }
+
+    int main(int argc, char* argv[]) {
+        if (argc != 3) usage(argv);
+
+        string ifilename = argv[1];
+        string ofilename = argv[2];
+        if (!file_exists(ifilename)) {
+            cerr << "error:\tinput-filename '" << ifilename << "' does not exist" << endl;;
+            exit(1);
+        }
+
+        cout << Timer::now() << endl;
+        write(ifilename, ofilename);
+
+        return 0;
+    }
+    #+end_src 
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    g++ runc.cpp -o runc -I.
+    echo '-------------'
+    ./runc 
+    echo '-------------'
+    ./runc test2.log
+    echo '-------------'
+    ./runc test2.log o.log
+    #+end_src
+
+    #+RESULTS:
+    #+begin_example
+
+    -------------
+    usage:
+    ./runc input-filename output-filename
+    -------------
+    usage:
+    ./runc input-filename output-filename
+    -------------
+    2024-10-15 21:25:00.957082176 (UTC+0)
+    duration: 493 ms
+    duration: 509 ms
+    #+end_example
+
+- read (only)
+  
+  + C: read $N$ lines of FIX file
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I. :tangle ./src/c++/benchmarking/read-nlines.cpp
+    #include "utils.h"    
+
+    Timer t = Timer(std::cerr);
+
+    void usage(char* argv[]) {
+        cerr << "usage:\n\tbash$ " << argv[0] << " input-filename number-of-lines" << endl;
+        exit(1);
+    }
+
+    std::vector<string> read(string const& ifilename, unsigned int nlines) {
+        FILE* fi = fopen(ifilename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        for (unsigned int i=0; i<nlines; ++i) {
+            if ((getline(&line, &len, fi)) != -1) {
+                array.push_back(line);
+            }
+        }
+        fclose(fi);
+        if (line) free(line);
+
+        return array;
+    }
+
+    int main(int argc, char* argv[]) {
+        if (argc != 3) usage(argv);
+
+        string ifilename = argv[1];
+        unsigned int nlines = stoi(argv[2]);
+        if (!file_exists(ifilename)) {
+            cerr << "error:\tinput-filename '" << ifilename << "' does not exist" << endl;;
+            exit(1);
+        }
+
+        cout << Timer::now() << endl;
+        t.start("read duration: ");
+        read(ifilename, nlines);
+        t.stop();
+        cout << Timer::now() << endl;
+
+        return 0;
+    }
+    #+end_src 
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    g++ read-nlines.cpp -o read-nlines -I. -O4
+    echo '-------------'
+    ./read-nlines
+    echo '-------------'
+    ./read-nlines test2.log
+    echo '-------------'
+    ./read-nlines test2.log 1000000
+    #+end_src
+
+    #+RESULTS:
+    #+begin_example
+
+    -------------
+    usage:
+	bash$ ./read-nlines input-filename number-of-lines
+    -------------
+    usage:
+	bash$ ./read-nlines input-filename number-of-lines
+    -------------
+    2024-10-16 14:52:01.945404828 (UTC+0)
+    read duration: 485 ms
+    2024-10-16 14:52:02.430713334 (UTC+0)
+    #+end_example
+    
+- threaded
+
+  + C: read $N$ lines of FIX file with $M$ threads
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I. :tangle ./src/c++/benchmarking/read-nlines-nthreads.cpp
+    #include "utils.h"    
+    #include <thread>
+
+    Timer t = Timer(std::cerr);
+
+    void usage(char* argv[]) {
+        cerr << "usage:\n\tbash$ " << argv[0] << " input-filename number-of-lines number-of-threads" << endl;
+        exit(1);
+    }
+
+    std::vector<string> read(unsigned int task, string const& ifilename, unsigned int nlines) {
+        stringstream s; s << "task #" << task << ": ";
+
+        FILE* fi = fopen(ifilename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        Timer t = Timer(std::cerr);
+        t.start(s.str());
+        std::vector<string> array;
+        for (unsigned int i=0; i<nlines; ++i) {
+            if ((getline(&line, &len, fi)) != -1) {
+                array.push_back(line);
+            }
+        }
+        fclose(fi);
+        if (line) free(line);
+        t.stop();
+
+        return array;
+    }
+
+    int main(int argc, char* argv[]) {
+        if (argc != 4) usage(argv);
+
+        string ifilename = argv[1];
+        unsigned int nlines = stoi(argv[2]);
+        unsigned int nthreads = stoi(argv[3]);
+        if (!file_exists(ifilename)) {
+            cerr << "error:\tinput-filename '" << ifilename << "' does not exist" << endl;;
+            exit(1);
+        }
+
+        cerr << Timer::now() << endl;
+        t.start("read duration: ");
+
+        std::vector<thread> threads;
+        for (unsigned int tt=0; tt<nthreads; ++tt) {
+            threads.push_back(thread(read, tt, ifilename, nlines));
+        }
+        for (unsigned int tt=0; tt<nthreads; ++tt) {
+            threads[tt].join();
+        }
+
+        t.stop();
+        cerr << Timer::now() << endl;
+
+        return 0;
+    }
+    #+end_src 
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    g++ read-nlines-nthreads.cpp -o read-nlines-nthreads -I. -O4
+    #  g++ ./thread.cpp -o thread.out -ansi -pedantic -pthread -std=c++0x
+    echo '-------------'
+    ./read-nlines-nthreads test2.log 1000000 3
+    #+end_src
+
+- ~Runner~: aggregate under a CLI
+
+  + C/C++: first cut at CLI - functions independent
+
+    #+begin_src C++ :exports both :results output :eval no :tangle ./src/c++/benchmarking/flags.cpp
+    #include "utils.h"
+    #include <functional>
+
+    using namespace std;
+
+    std::vector<string> read_cpp(string const& filename) {
+        ifstream fi(filename);
+        string line;
+        std::vector<string> array;
+        while (getline(fi, line)) {
+            array.push_back(line);
+        }
+
+        return array;
+    }
+
+    std::vector<string> read_c(string const& filename) {
+        FILE* fi = fopen(filename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        while ((getline(&line, &len, fi)) != -1) {
+            array.push_back(line);
+        }
+        fclose(fi);
+        if (line) free(line);
+
+        return array;
+    }
+
+    std::vector<string> read_c_nlines(string const& filename, unsigned int nlines) {
+        FILE* fi = fopen(filename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        for (unsigned int i=0; i<nlines; ++i) {
+            if ((getline(&line, &len, fi)) != -1) {
+                array.push_back(line);
+            }
+        }
+        fclose(fi);
+        if (line) free(line);
+
+        return array;
+    }
+
+    void usage(char* argv[]) {
+        cerr << "Usage:\n\t" << argv[0] << " <option(s)>\n"
+                << "Options:\n"
+                << "\t-h,--help                                 : show this help message\n"
+                << "\t-r,--read-function [read_c|read_cpp|...]  : function to read --read-filename\n"
+                << "\t-f,--read-filename FILENAME               : filename to read\n"
+                << "\t-n,--read-nlines   NLINES                 : number of lines to read from --read-filename\n"
+                << "\t-t,--read-nthreads NUMTHREADS             : number of threads for --read-function\n";
+        exit(1);
+    }
+
+    bool is_short_option(string const& arg) {
+        if (arg.rfind("-")==0 && arg.rfind("--")!=0) return true;
+        return false; 
+    }
+
+    bool is_long_option(string const& arg) {
+        if (arg.rfind("--")==0) return true;
+        return false; 
+    }
+
+    bool is_safe_to_read(unsigned int i, int argc, char* argv[]) {
+        if (i < argc && (!is_short_option(argv[i]) && !is_long_option(argv[i]))) return true;
+        return false; 
+    }
+
+    enum class Flag {
+        help,
+        rfunction,
+        rfilename,
+        nlines,
+        nthreads,
+    };
+    map<string,Flag> flags = {
+        {"--help", Flag::help},                {"-h", Flag::help},
+        {"--read-function", Flag::rfunction},  {"-r", Flag::rfunction},
+        {"--read-filename", Flag::rfilename},  {"-f", Flag::rfilename}, 
+        {"--read-nlines", Flag::nlines},       {"-n", Flag::nlines},    
+        {"--read-nthreads", Flag::nthreads},   {"-t", Flag::nthreads},  
+    };
+
+    int main(int argc, char* argv[]) {
+        if (argc < 5) usage(argv);
+
+        // required
+        string rfunction;
+        function<vector<string>(string const&)> func_read;
+        string rfilename;
+        // optional
+        unsigned int   nthreads = 1;
+
+        for (size_t i=1; i<argc; ++i) {  // <- start at i=1: argv[0] is the program name
+            switch ( flags[string(argv[i])] ) {
+                case Flag::help:
+                    usage(argv);
+                    break;
+                case Flag::rfunction:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        rfunction=argv[++i];
+                        if (rfunction=="read_c") {
+                            func_read=read_c;
+                        }
+                        else if (rfunction=="read_cpp") {
+                            func_read=read_cpp;
+                        }
+                        else {
+                            cerr << "--read-function : unrecognized read function '" << rfunction << "'" << endl;
+                            exit(1);
+                        }
+                    }
+                    else { 
+                        cerr << "--read-function requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::rfilename:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        rfilename=argv[++i];
+                    }
+                    else { 
+                        cerr << "--read-filename requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::nthreads:
+                    if (i+1 < argc && (!is_short_option(argv[i+1]) && !is_long_option(argv[i+1]))) {
+                        nthreads=stoi(argv[++i]);
+                    }
+                    else { 
+                        cerr << "--nthreads requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                default:
+                    cerr << argv[0] << ": shouldn't be here" << endl;
+            }
+        }
+        // required arguments
+        if (rfunction.length()==0) {
+            cerr << "--read-function not specified\n\n";
+            usage(argv);
+        }
+        if (rfilename.length()==0) {
+            cerr << "--read-filename not specified\n\n";
+            usage(argv);
+        }
+
+        cout << argv[0] << ": rfunction='" << rfunction << "'" << endl;
+        cout << argv[0] << ": rfilename='" << rfilename << "'" << endl;
+        cout << argv[0] << ": nthreads=" << nthreads << endl;
+        #if 0
+        #endif 
+
+        Timer timer = Timer(std::cerr);
+        timer.start("read duration: ");
+
+        func_read(rfilename);
+
+        timer.stop();
+
+        return 0;
+    }
+    #+end_src 
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I. :tangle ./read-nlines-nthreads.cpp
+    #include "utils.h"    
+    #include <thread>
+
+    Timer t = Timer(std::cerr);
+
+    void usage(char* argv[]) {
+        cerr << "usage:\n\tbash$ " << argv[0] << " input-filename number-of-lines number-of-threads" << endl;
+        exit(1);
+    }
+
+    std::vector<string> read(unsigned int task, string const& ifilename, unsigned int nlines) {
+        stringstream s; s << "task #" << task << ": ";
+
+        FILE* fi = fopen(ifilename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        Timer t = Timer(std::cerr);
+        t.start(s.str());
+        std::vector<string> array;
+        for (unsigned int i=0; i<nlines; ++i) {
+            if ((getline(&line, &len, fi)) != -1) {
+                array.push_back(line);
+            }
+        }
+        fclose(fi);
+        if (line) free(line);
+        t.stop();
+
+        return array;
+    }
+
+    int main(int argc, char* argv[]) {
+        if (argc != 4) usage(argv);
+
+        string ifilename = argv[1];
+        unsigned int nlines = stoi(argv[2]);
+        unsigned int nthreads = stoi(argv[3]);
+        if (!file_exists(ifilename)) {
+            cerr << "error:\tinput-filename '" << ifilename << "' does not exist" << endl;;
+            exit(1);
+        }
+
+        cerr << Timer::now() << endl;
+        t.start("read duration: ");
+
+        std::vector<thread> threads;
+        for (unsigned int tt=0; tt<nthreads; ++tt) {
+            threads.push_back(thread(read, tt, ifilename, nlines));
+        }
+        for (unsigned int tt=0; tt<nthreads; ++tt) {
+            threads[tt].join();
+        }
+
+        t.stop();
+        cerr << Timer::now() << endl;
+
+        return 0;
+    }
+    #+end_src 
+
+    #+begin_src bash :session *bash* :exports both :results output :eval yes
+    g++ read-nlines-nthreads.cpp -o read-nlines-nthreads -I. -O4
+    #  g++ ./thread.cpp -o thread.out -ansi -pedantic -pthread -std=c++0x
+    echo '-------------'
+    ./read-nlines-nthreads test2.log 1000000 3
+    #+end_src
+
+  + C/C++: using ~Runner~
+
+    #+begin_src C++ :exports both :results output :eval no :tangle ./src/c++/benchmarking/runner.cpp
+    #include "utils.h"
+    #include <functional>
+    #include <limits>
+
+    using namespace std;
+
+    std::vector<string> read_cpp(string const& filename) {
+        ifstream fi(filename);
+        string line;
+        std::vector<string> array;
+        while (getline(fi, line)) {
+            array.push_back(line);
+        }
+
+        return array;
+    }
+
+    std::vector<string> read_c(string const& filename) {
+        FILE* fi = fopen(filename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        while ((getline(&line, &len, fi)) != -1) {
+            array.push_back(line);
+        }
+        fclose(fi);
+        if (line) free(line);
+
+        return array;
+    }
+
+    std::vector<string> read_c_nlines(string const& filename, unsigned long nlines=ULONG_MAX) {
+        FILE* fi = fopen(filename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        for (unsigned int i=0; i<nlines; ++i) {
+            if ((getline(&line, &len, fi)) != -1) {
+                array.push_back(line);
+            }
+        }
+        fclose(fi);
+        if (line) free(line);
+
+        return array;
+    }
+
+    std::vector<string> read_cpp_nlines(string const& filename, unsigned long nlines=ULONG_MAX) {
+        std::vector<string> array;
+        cerr << "read_cpp_nlines : PLACEHOLDER ONLY" << endl;
+
+        return array;
+    }
+
+    // function registry
+    map<string, function<vector<string>(string const&,unsigned long)> > read_functions = {
+        {"read_c_nlines",   read_c_nlines},
+        {"read_cpp_nlines", read_cpp_nlines}
+    };
+    vector<string> keys(map<string, function<vector<string>(string const&,unsigned long)>> const& m) {
+        vector<string> o;
+        for (auto const& e : m) o.push_back(e.first);
+
+        return o;
+    }
+
+    class Runner {
+        string       _rfunction;
+        string       _rfilename;
+        unsigned long _rnlines;
+        unsigned int _rnthreads;
+        // disallow copy, assignment:
+        Runner(Runner const& rhs);
+        Runner& operator=(Runner const& rhs);
+    public:
+        Runner(
+            string const& rfunction,
+            string const& rfilename,
+            unsigned long nlines,
+            unsigned int nthreads
+        ) :
+            _rfunction(rfunction),
+            _rfilename(rfilename),
+            _rnlines(nlines),
+            _rnthreads(nthreads)
+        {
+            Timer timer = Timer(cerr);
+            timer.start("read duration: ");
+            if (_rnthreads==0) {
+                cerr << "Runner::Runner : nthreads=" << _rnthreads << endl;
+                if (_rnlines==ULONG_MAX) {
+                    if (_rfunction=="read_c") {
+                        read_c(_rfilename);
+                    }
+                    if (_rfunction=="read_cpp") {
+                        read_c(_rfilename);
+                    }
+                }
+                else {
+                    if (_rfunction=="read_c_nlines") {
+                        read_c_nlines(_rfilename, _rnlines);
+                    }
+                    else {
+                        cerr << "Runner::Runner : cannot run read function " << _rfunction << endl;
+                    }
+                }
+            }
+            else {
+                std::vector<thread> threads;
+                for (unsigned int tt=0; tt<nthreads; ++tt) {
+                    threads.push_back(thread(read_functions[_rfunction], _rfilename, _rnlines));
+                }
+                for (unsigned int tt=0; tt<nthreads; ++tt) {
+                    stringstream s; s << "task #" << tt << ": ";
+                    Timer timer = Timer(std::cerr);
+                    timer.start(s.str());
+                    threads[tt].join();
+                    timer.stop();
+                }
+            }
+            timer.stop();
+        }
+
+        void run() {}
+    };
+
+    void usage(char* argv[]) {
+        cerr << "Usage:\n\t" << argv[0] << " <option(s)>\n"
+                << "Options:\n"
+                << "\t-h,--help                                 : show this help message\n"
+                << "\t-r,--read-function [read_c|read_cpp|...]  : function to read --read-filename\n"
+                << "\t-f,--read-filename FILENAME               : filename to read\n"
+                << "\t-n,--read-nlines   NLINES                 : number of lines to read from --read-filename\n"
+                << "\t-t,--read-nthreads NUMTHREADS             : number of threads for --read-function\n";
+        exit(1);
+    }
+
+    bool is_short_option(string const& arg) {
+        if (arg.rfind("-")==0 && arg.rfind("--")!=0) return true;
+        return false; 
+    }
+
+    bool is_long_option(string const& arg) {
+        if (arg.rfind("--")==0) return true;
+        return false; 
+    }
+
+    bool is_safe_to_read(unsigned int i, int argc, char* argv[]) {
+        if (i < argc && (!is_short_option(argv[i]) && !is_long_option(argv[i]))) return true;
+        return false; 
+    }
+
+    enum class Flag {
+        help,
+        rfunction,
+        rfilename,
+        nlines,
+        nthreads,
+    };
+    map<string,Flag> flags = {
+        {"--help", Flag::help},                {"-h", Flag::help},
+        {"--read-function", Flag::rfunction},  {"-r", Flag::rfunction},
+        {"--read-filename", Flag::rfilename},  {"-f", Flag::rfilename}, 
+        {"--read-nlines", Flag::nlines},       {"-n", Flag::nlines},    
+        {"--read-nthreads", Flag::nthreads},   {"-t", Flag::nthreads},  
+    };
+
+    int main(int argc, char* argv[]) {
+        if (argc < 5) usage(argv);
+
+        // required
+        string rfunction;
+        function<vector<string>(string const&)> func_read;
+        string rfilename;
+        // optional
+        unsigned long nlines = ULONG_MAX;
+        unsigned int nthreads = 0;
+
+        for (size_t i=1; i<argc; ++i) {  // <- start at i=1: argv[0] is the program name
+            switch ( flags[string(argv[i])] ) {
+                case Flag::help:
+                    usage(argv);
+                    break;
+                case Flag::rfunction:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        rfunction=argv[++i];
+                        vector<string> functions = keys(read_functions);
+                        if (find(functions.begin(), functions.end(), rfunction) == functions.end()) {
+                            cerr << "--read-function : unrecognized read function '" << rfunction << "'" << endl;
+                            exit(1);
+                        }
+                    }
+                    else { 
+                        cerr << "--read-function requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::rfilename:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        rfilename=argv[++i];
+                    }
+                    else { 
+                        cerr << "--read-filename requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::nlines:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        nlines=stoi(argv[++i]);
+                    }
+                    else { 
+                        cerr << "--nlines requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::nthreads:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        nthreads=stoi(argv[++i]);
+                    }
+                    else { 
+                        cerr << "--nthreads requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                default:
+                    cerr << argv[0] << ": shouldn't be here" << endl;
+            }
+        }
+        // required arguments
+        if (rfunction.length()==0) {
+            cerr << "--read-function not specified\n\n";
+            usage(argv);
+        }
+        if (rfilename.length()==0) {
+            cerr << "--read-filename not specified\n\n";
+            usage(argv);
+        }
+
+        cout << argv[0] << ": rfunction='" << rfunction << "'" << endl;
+        cout << argv[0] << ": rfilename='" << rfilename << "'" << endl;
+        cout << argv[0] << ": rfilename='" << rfilename << "'" << " has " << nlines_in_file_cpp(rfilename) << " lines" << endl;
+
+        cout << argv[0] << ": nthreads=" << nthreads << endl;
+        cout << argv[0] << ": nlines=" << (nlines == ULONG_MAX ? "ALL" : to_string(nlines)) << endl;
+        #if 0
+        #endif 
+
+        Runner runner = Runner(
+            rfunction=rfunction,
+            rfilename=rfilename,
+            nlines=nlines,
+            nthreads=nthreads
+        );
+
+        return 0;
+    }
+    #+end_src 
+
+  + C/C++: using ~Runner~ - ~read_*_nlines~ only
+
+    #+begin_src C++ :exports both :results output :eval no :tangle ./src/c++/benchmarking/runner.cpp
+    #include "utils.h"
+    #include <functional>
+    #include <limits>
+
+    using namespace std;
+
+    std::vector<string> read_c_nlines(string const& filename, unsigned long nlines=ULONG_MAX, unsigned int task=UINT_MAX) {
+        Timer t(std::cerr);
+        if (task!=UINT_MAX) {
+            stringstream s; s << "task #" << task << ": ";
+            t.start(s.str());
+        }
+
+        FILE* fi = fopen(filename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        if (nlines==ULONG_MAX) {
+            while ((getline(&line, &len, fi)) != -1) {
+                array.push_back(line);
+            }
+        }
+        else {
+            for (unsigned long i=0; i<nlines; ++i) {
+                if ((getline(&line, &len, fi)) != -1) {
+                    array.push_back(line);
+                }
+            }
+        }
+
+        fclose(fi);
+        if (line) free(line);
+
+        if (task!=UINT_MAX) {
+            t.stop();
+        }
+
+        return array;
+    }
+
+    std::vector<string> read_cpp_nlines(string const& filename, unsigned long nlines=ULONG_MAX, unsigned int task=UINT_MAX) {
+        ifstream fi(filename);
+        string line;
+        std::vector<string> array;
+
+        Timer t(std::cerr);
+        if (task!=UINT_MAX) {
+            stringstream s; s << "task #" << task << ": ";
+            t.start(s.str());
+        }
+
+        if (nlines==ULONG_MAX) {
+            while (getline(fi, line)) {
+                array.push_back(line);
+            }
+        }
+        else {
+            for (unsigned long i=0; i<nlines; ++i) {
+                getline(fi, line);
+                array.push_back(line);
+            }
+        }
+
+        if (task!=UINT_MAX) {
+            t.stop();
+        }
+
+        return array;
+    }
+
+    // function registry
+    map<string, function<vector<string>(string const&,unsigned long, unsigned int)> > read_functions = {
+        {"read_c_nlines",   read_c_nlines},
+        {"read_cpp_nlines", read_cpp_nlines}
+    };
+    vector<string> keys(map<string, function<vector<string>(string const&,unsigned long,unsigned int)>> const& m) {
+        vector<string> o;
+        for (auto const& e : m) o.push_back(e.first);
+
+        return o;
+    }
+
+    class Runner {
+        string       _rfunction;
+        string       _rfilename;
+        unsigned long _rnlines;
+        unsigned int _rnthreads;
+        // disallow copy, assignment:
+        Runner(Runner const& rhs);
+        Runner& operator=(Runner const& rhs);
+    public:
+        Runner(
+            string const& rfunction,
+            string const& rfilename,
+            unsigned long nlines,
+            unsigned int nthreads
+        ) :
+            _rfunction(rfunction),
+            _rfilename(rfilename),
+            _rnlines(nlines),
+            _rnthreads(nthreads)
+        {
+            Timer timer(std::cerr);
+            timer.start("read duration: ");
+            if (_rnthreads==0) {
+                read_functions[_rfunction](_rfilename, _rnlines, 0);
+            }
+            else {
+                std::vector<thread> threads;
+                for (unsigned int task=0; task<_rnthreads; ++task) {
+                    threads.push_back(thread(read_functions[_rfunction], _rfilename, _rnlines, task));
+                }
+                for (unsigned int task=0; task<nthreads; ++task) {
+                    threads[task].join();
+                }
+            }
+            timer.stop();
+        }
+
+        void run() {}
+    };
+
+    void usage(char* argv[]) {
+        cerr << "Usage:\n\t" << argv[0] << " <option(s)>\n"
+                << "Options:\n"
+                << "\t-h,--help                                 : show this help message\n"
+                << "\t-r,--read-function [read_c|read_cpp|...]  : function to read --read-filename\n"
+                << "\t-f,--read-filename FILENAME               : filename to read\n"
+                << "\t-n,--read-nlines   NLINES                 : number of lines to read from --read-filename\n"
+                << "\t-t,--read-nthreads NUMTHREADS             : number of threads for --read-function\n";
+        exit(1);
+    }
+
+    bool is_short_option(string const& arg) {
+        if (arg.rfind("-")==0 && arg.rfind("--")!=0) return true;
+        return false; 
+    }
+
+    bool is_long_option(string const& arg) {
+        if (arg.rfind("--")==0) return true;
+        return false; 
+    }
+
+    bool is_safe_to_read(unsigned int i, int argc, char* argv[]) {
+        if (i < argc && (!is_short_option(argv[i]) && !is_long_option(argv[i]))) return true;
+        return false; 
+    }
+
+    enum class Flag {
+        help,
+        rfunction,
+        rfilename,
+        nlines,
+        nthreads,
+    };
+    map<string,Flag> flags = {
+        {"--help", Flag::help},                {"-h", Flag::help},
+        {"--read-function", Flag::rfunction},  {"-r", Flag::rfunction},
+        {"--read-filename", Flag::rfilename},  {"-f", Flag::rfilename}, 
+        {"--read-nlines", Flag::nlines},       {"-n", Flag::nlines},    
+        {"--read-nthreads", Flag::nthreads},   {"-t", Flag::nthreads},  
+    };
+
+    int main(int argc, char* argv[]) {
+        if (argc < 5) usage(argv);
+
+        // required
+        string rfunction;
+        function<vector<string>(string const&)> func_read;
+        string rfilename;
+        // optional
+        unsigned long nlines = ULONG_MAX;
+        unsigned int nthreads = 0;
+
+        for (size_t i=1; i<argc; ++i) {  // <- start at i=1: argv[0] is the program name
+            switch ( flags[string(argv[i])] ) {
+                case Flag::help:
+                    usage(argv);
+                    break;
+                case Flag::rfunction:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        rfunction=argv[++i];
+                        vector<string> functions = keys(read_functions);
+                        if (find(functions.begin(), functions.end(), rfunction) == functions.end()) {
+                            cerr << "--read-function : unrecognized read function '" << rfunction << "'" << endl;
+                            exit(1);
+                        }
+                    }
+                    else { 
+                        cerr << "--read-function requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::rfilename:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        rfilename=argv[++i];
+                    }
+                    else { 
+                        cerr << "--read-filename requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::nlines:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        nlines=stoi(argv[++i]);
+                    }
+                    else { 
+                        cerr << "--nlines requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::nthreads:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        nthreads=stoi(argv[++i]);
+                    }
+                    else { 
+                        cerr << "--nthreads requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                default:
+                    cerr << argv[0] << ": shouldn't be here" << endl;
+            }
+        }
+        // required arguments
+        if (rfunction.length()==0) {
+            cerr << "--read-function not specified\n\n";
+            usage(argv);
+        }
+        if (rfilename.length()==0) {
+            cerr << "--read-filename not specified\n\n";
+            usage(argv);
+        }
+
+        cout << argv[0] << ": rfunction='" << rfunction << "'" << endl;
+        cout << argv[0] << ": rfilename='" << rfilename << "'" << endl;
+        cout << argv[0] << ": rfilename='" << rfilename << "'" << " has " << nlines_in_file_cpp(rfilename) << " lines" << endl;
+        cout << argv[0] << ": nthreads=" << nthreads << endl;
+        cout << argv[0] << ": nlines=" << (nlines == ULONG_MAX ? "ALL" : to_string(nlines)) << endl;
+        #if 0
+        #endif 
+
+        Runner runner = Runner(
+            rfunction=rfunction,
+            rfilename=rfilename,
+            nlines=nlines,
+            nthreads=nthreads
+        );
+
+        return 0;
+    }
+    #+end_src 
+    
+  + C/C++: using ~Runner~ - ~read_*_nlines~ only, add ~write*~ functions
+
+    created the following by tangling - something up with Org (only useful for small
+    C++ files) - now checking in runner.cpp and will edit it directly
+
+    #+begin_src C++ :exports both :results output :eval no :tangle ./src/c++/benchmarking/runner.cpp
+    #include "utils.h"
+    #include <functional>
+    #include <limits>
+
+    using namespace std;
+
+    std::vector<string> read_c_nlines(string const& filename, unsigned long nlines=ULONG_MAX, unsigned int task=UINT_MAX) {
+        Timer t(std::cerr);
+        if (task!=UINT_MAX) {
+            stringstream s; s << "task #" << task << ": ";
+            t.start(s.str());
+        }
+
+        FILE* fi = fopen(filename.c_str(), "r");
+        char* line = NULL;
+        size_t len = 0;
+
+        std::vector<string> array;
+        if (nlines==ULONG_MAX) {
+            while ((getline(&line, &len, fi)) != -1) {
+                array.push_back(line);
+            }
+        }
+        else {
+            for (unsigned long i=0; i<nlines; ++i) {
+                if ((getline(&line, &len, fi)) != -1) {
+                    array.push_back(line);
+                }
+            }
+        }
+
+        fclose(fi);
+        if (line) free(line);
+
+        if (task!=UINT_MAX) {
+            t.stop();
+        }
+
+        return array;
+    }
+
+    std::vector<string> read_cpp_nlines(string const& filename, unsigned long nlines=ULONG_MAX, unsigned int task=UINT_MAX) {
+        ifstream fi(filename);
+        string line;
+        std::vector<string> array;
+
+        Timer t(std::cerr);
+        if (task!=UINT_MAX) {
+            stringstream s; s << "task #" << task << ": ";
+            t.start(s.str());
+        }
+
+        if (nlines==ULONG_MAX) {
+            while (getline(fi, line)) {
+                array.push_back(line);
+            }
+        }
+        else {
+            for (unsigned long i=0; i<nlines; ++i) {
+                getline(fi, line);
+                array.push_back(line);
+            }
+        }
+
+        if (task!=UINT_MAX) {
+            t.stop();
+        }
+
+        return array;
+    }
+
+    void write_c_ORIGINAL(string const& rfilename, string const& wfilename, unsigned long nlines=ULONG_MAX, unsigned int task=UINT_MAX) {
+        if (nlines!=ULONG_MAX) {
+            cerr << "write_c : nlines=" << nlines << ", but should be " << ULONG_MAX << endl;
+            exit(1);
+        }
+        if (task!=UINT_MAX) {
+            cerr << "write_c : task=" << task << ", but should be " << UINT_MAX << endl;
+            exit(1);
+        }
+
+        // fixed-cost: do not include in write timing - use fastest read (read_c_nlines)
+        std::vector<string> array = std::move(read_c_nlines(rfilename));
+
+        Timer t(std::cerr);
+        if (task==UINT_MAX) {
+            t.start("write_c_ORIGINAL: ");
+        }
+        else {
+            stringstream s; s << "write_c_ORIGINAL - task #" << task << ": ";
+            t.start(s.str());
+        }
+
+        FILE* fo = fopen(wfilename.c_str(), "w");
+
+        if (nlines==ULONG_MAX) {
+            for (size_t i=0; i<array.size(); ++i) {
+                fprintf(fo, "%s", array[i].c_str());
+            }
+        }
+        else {
+        }
+
+        fclose(fo);
+        t.stop();
+
+        return;
+    }
+
+    void write_c(vector<string>& array, string const& wfilename, unsigned long nlines=ULONG_MAX, unsigned int task=UINT_MAX) {
+        if (nlines!=ULONG_MAX) {
+            cerr << "write_c : nlines=" << nlines << ", but should be " << ULONG_MAX << endl;
+            exit(1);
+        }
+        if (task!=UINT_MAX) {
+            cerr << "write_c : task=" << task << ", but should be " << UINT_MAX << endl;
+            exit(1);
+        }
+
+        Timer t(std::cerr);
+        if (task==UINT_MAX) {
+            t.start("write_c: ");
+        }
+        else {
+            stringstream s; s << "write_c - task #" << task << ": ";
+            t.start(s.str());
+        }
+
+        FILE* fo = fopen(wfilename.c_str(), "w");
+
+        if (nlines==ULONG_MAX) {
+            for (size_t i=0; i<array.size(); ++i) {
+                fprintf(fo, "%s", array[i].c_str());
+            }
+        }
+        else {
+        }
+
+        fclose(fo);
+        t.stop();
+
+        return;
+    }
+
+    void write_cpp(vector<string>& array, string const& wfilename, unsigned long nlines=ULONG_MAX, unsigned int task=UINT_MAX) {
+        if (nlines!=ULONG_MAX) {
+            cerr << "write_cpp : nlines=" << nlines << ", but should be " << ULONG_MAX << endl;
+            exit(1);
+        }
+        if (task!=UINT_MAX) {
+            cerr << "write_cpp : task=" << task << ", but should be " << UINT_MAX << endl;
+            exit(1);
+        }
+
+        Timer t(std::cerr);
+        if (task==UINT_MAX) {
+            t.start("write_cpp: ");
+        }
+        else {
+            stringstream s; s << "write_cpp - task #" << task << ": ";
+            t.start(s.str());
+        }
+
+        ofstream fo; fo.open(wfilename);
+
+        if (nlines==ULONG_MAX) {
+            for (size_t i=0; i<array.size(); ++i) {
+                fo << array[i] << endl;
+            }
+        }
+        else {
+        }
+
+        fo.close();
+        t.stop();
+
+        return;
+    }
+
+    // write-function registry
+    map<string, function<void(vector<string>&,string const&,unsigned long, unsigned int)> > write_functions = {
+        {"write_c",   write_c},
+        {"write_cpp", write_cpp}
+    };
+    vector<string> keys(map<string, function<void(vector<string>&,string const&,unsigned long, unsigned int)>> const& m) {
+        vector<string> o;
+        for (auto const& e : m) o.push_back(e.first);
+
+        return o;
+    }
+    // read-function registry
+    map<string, function<vector<string>(string const&,unsigned long, unsigned int)> > read_functions = {
+        {"read_c_nlines",   read_c_nlines},
+        {"read_cpp_nlines", read_cpp_nlines}
+    };
+    vector<string> keys(map<string, function<vector<string>(string const&,unsigned long,unsigned int)>> const& m) {
+        vector<string> o;
+        for (auto const& e : m) o.push_back(e.first);
+
+        return o;
+    }
+
+    class Runner {
+        string         _wfilename;
+        string         _wfunction;
+        string         _rfilename;
+        string         _rfunction;
+        unsigned long  _rnlines;
+        unsigned int   _rnthreads;
+        // disallow copy, assignment:
+        Runner(Runner const& rhs);
+        Runner& operator=(Runner const& rhs);
+    public:
+        Runner(
+            string const& wfilename,
+            string const& wfunction,
+            string const& rfilename,
+            string const& rfunction,
+            unsigned long nlines,
+            unsigned int  nthreads
+        ) :
+            _wfilename(wfilename),
+            _wfunction(wfunction),
+            _rfilename(rfilename),
+            _rfunction(rfunction),
+            _rnlines(nlines),
+            _rnthreads(nthreads)
+        {
+            cerr << "Runner::Runner : _wfilename=" << _wfilename << endl;
+            cerr << "Runner::Runner : _wfunction=" << _wfunction << endl;
+            cerr << "Runner::Runner : _rfilename=" << _rfilename << endl;
+            cerr << "Runner::Runner : _rfunction=" << _rfunction << endl;
+            cerr << "Runner::Runner : _rnlines=" << _rnlines << endl;
+            cerr << "Runner::Runner : _rnthreads=" << _rnthreads << endl;
+        }
+
+        void write() {
+            // fixed-cost: do not include in write timing - use fastest read (read_c_nlines)
+            std::vector<string> array = std::move(read_c_nlines(_rfilename));
+
+            // Timer timer(std::cerr);
+            // timer.start("Runner::write duration: ");
+
+            if (_rnthreads==UINT_MAX) {
+                write_functions[_wfunction](array, _wfilename, ULONG_MAX, UINT_MAX);
+            }
+
+            // timer.stop();
+        }
+
+        void read() {
+            Timer timer(std::cerr);
+            timer.start("Runner::read duration: ");
+
+            if (_rnthreads==UINT_MAX) {
+                read_functions[_rfunction](_rfilename, _rnlines, _rnthreads);
+            }
+            else {
+                std::vector<thread> threads;
+                for (unsigned int task=0; task<_rnthreads; ++task) {
+                    threads.push_back(thread(read_functions[_rfunction], _rfilename, _rnlines, task));
+                }
+                for (unsigned int task=0; task<_rnthreads; ++task) {
+                    threads[task].join();
+                }
+            }
+
+            timer.stop();
+        }
+
+        void run() {
+            if (_wfilename!="") {
+                cerr << "Runner::run: ignoring _rnlines" << endl;
+                _rnlines = ULONG_MAX;
+                cerr << "Runner::run: ignoring _rnthreads" << endl;
+                _rnthreads = UINT_MAX;
+                write();
+            }
+            else {
+                read();
+            }
+        }
+    };
+
+    void usage(char* argv[]) {
+        cerr << "Usage:\n\t" << argv[0] << " <option(s)>\n"
+                << "Options:\n"
+                << "\t-h,--help                                    : show this help message\n"
+                << "\t-w,--write-filename FILENAME                 : filename to write to\n"
+                << "\t-o,--write-function [write_c|write_cpp|...]  : function to write --write-filename\n"
+                << "\t-f,--read-filename FILENAME                  : filename to read from\n"
+                << "\t-n,--read-nlines   NLINES                    : number of lines to read from --read-filename\n"
+                << "\t-i,--read-function [read_c|read_cpp|...]     : function to read --read-filename\n"
+                << "\t-t,--read-nthreads NUMTHREADS                : number of threads for --read-function\n";
+        exit(1);
+    }
+
+    bool is_short_option(string const& arg) {
+        if (arg.rfind("-")==0 && arg.rfind("--")!=0) return true;
+        return false; 
+    }
+
+    bool is_long_option(string const& arg) {
+        if (arg.rfind("--")==0) return true;
+        return false; 
+    }
+
+    bool is_safe_to_read(unsigned int i, int argc, char* argv[]) {
+        if (i < argc && (!is_short_option(argv[i]) && !is_long_option(argv[i]))) return true;
+        return false; 
+    }
+
+    enum class Flag {
+        help,
+        wfilename,
+        wfunction,
+        rfilename,
+        rfunction,
+        nlines,
+        nthreads
+    };
+    map<string,Flag> flags = {
+        {"--help", Flag::help},                {"-h", Flag::help},
+        {"--write-filename", Flag::wfilename}, {"-w", Flag::wfilename}, 
+        {"--write-function", Flag::wfunction}, {"-o", Flag::wfunction},
+        {"--read-filename", Flag::rfilename},  {"-f", Flag::rfilename}, 
+        {"--read-function", Flag::rfunction},  {"-i", Flag::rfunction},
+        {"--read-nlines", Flag::nlines},       {"-n", Flag::nlines},    
+        {"--read-nthreads", Flag::nthreads},   {"-t", Flag::nthreads},  
+    };
+
+    int main(int argc, char* argv[]) {
+        if (argc < 5) usage(argv);
+
+        // required
+        string wfunction;
+        string rfunction;
+        function<vector<string>(string const&)> func_read;
+        string rfilename;
+        // optional
+        unsigned long nlines = ULONG_MAX;
+        unsigned int nthreads = UINT_MAX;
+        string wfilename="";
+
+        for (size_t i=1; i<argc; ++i) {  // <- start at i=1: argv[0] is the program name
+            switch ( flags[string(argv[i])] ) {
+                case Flag::help:
+                    usage(argv);
+                    break;
+                case Flag::wfilename:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        wfilename=argv[++i];
+                    }
+                    else { 
+                        cerr << "--write-filename requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::wfunction:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        wfunction=argv[++i];
+                        vector<string> functions = keys(write_functions);
+                        if (find(functions.begin(), functions.end(), wfunction) == functions.end()) {
+                            cerr << "--write-function : unrecognized write function '" << rfunction << "'" << endl;
+                            exit(1);
+                        }
+                    }
+                    else { 
+                        cerr << "--write-function requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::rfilename:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        rfilename=argv[++i];
+                    }
+                    else { 
+                        cerr << "--read-filename requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::rfunction:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        rfunction=argv[++i];
+                        vector<string> functions = keys(read_functions);
+                        if (find(functions.begin(), functions.end(), rfunction) == functions.end()) {
+                            cerr << "--read-function : unrecognized read function '" << rfunction << "'" << endl;
+                            exit(1);
+                        }
+                    }
+                    else { 
+                        cerr << "--read-function requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::nlines:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        nlines=stoi(argv[++i]);
+                    }
+                    else { 
+                        cerr << "--nlines requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                case Flag::nthreads:
+                    if (is_safe_to_read(i+1, argc, argv)) {
+                        unsigned int value=stoi(argv[++i]);
+                        if (value!=0) {
+                            nthreads=value;
+                        }
+                    }
+                    else { 
+                        cerr << "--nthreads requires argument" << endl;
+                        exit(1);
+                    }
+                    break;
+                default:
+                    cerr << argv[0] << ": shouldn't be here" << endl;
+            }
+        }
+        // required arguments
+        if (wfunction.length()==0) {
+            cerr << "--write-function not specified\n\n";
+            usage(argv);
+        }
+        if (rfunction.length()==0) {
+            cerr << "--read-function not specified\n\n";
+            usage(argv);
+        }
+        if (rfilename.length()==0) {
+            cerr << "--read-filename not specified\n\n";
+            usage(argv);
+        }
+
+        cout << argv[0] << ": rfunction='" << rfunction << "'" << endl;
+        cout << argv[0] << ": rfilename='" << rfilename << "'" << endl;
+        cout << argv[0] << ": rfilename='" << rfilename << "'" << " has " << nlines_in_file_cpp(rfilename) << " lines" << endl;
+        cout << argv[0] << ": nthreads=" << (nthreads == UINT_MAX ? "NO THREADS" : to_string(nthreads)) << endl;
+        cout << argv[0] << ": nlines=" << (nlines == ULONG_MAX ? "ALL" : to_string(nlines)) << endl;
+        cout << argv[0] << ": wfilename='" << wfilename << "'" << endl;
+        #if 0
+        #endif 
+
+        Runner runner(
+            wfilename=wfilename,
+            wfunction=wfunction,
+            rfilename=rfilename,
+            rfunction=rfunction,
+            nlines=nlines,
+            nthreads=nthreads
+        );
+        runner.run();
+
+        return 0;
+    }
+    #+end_src 
+
+  + at this point i started developing the ~runner*.cpp~ files directly in ~./src/c++/benchmarking~ - Org has some funkiness with formatting C++ files going on 
+
+*** timers
+Source:
+- Howard Hinnant's ~date~
+  + https://howardhinnant.github.io/date/date.html
+  + see, in particular, the section: /What about a date-time type?/
+    
+- StackOverflow: /Sleep for milliseconds/
+  + https://stackoverflow.com/questions/4184468/sleep-for-milliseconds 
+
+Points:
+
+- using ~sleep~
+  
+  + ~chrono::steady_clock::now()~, ~sleep~ (units of seconds)
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11
+    #include<iostream>
+    #include<chrono>     // steady_clock
+    #include <unistd.h>  // sleep
+
+    using namespace std;
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+	// you can't do this:
+	// cout << "begin: " << begin << endl;
+	sleep(2);   
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+
+	cout << "duration: " << chrono::duration_cast<chrono::milliseconds>(end-begin).count() << " ms" << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    : duration: 2000 ms
+
+  + ~chrono::system_clock::now()~, ~sleep~, ~put_time~, ~localtime~ 
+
+    Source: https://stackoverflow.com/questions/17223096/outputting-date-and-time-in-c-using-stdchrono
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11
+    #include<iostream>
+    #include<chrono>
+    #include<ctime>    // localtime
+    #include<iomanip>  // put_time
+    #include<sstream>  // stringstream
+    #include<unistd.h> // sleep
+
+
+    // Source: https://stackoverflow.com/questions/17223096/outputting-date-and-time-in-c-using-stdchrono
+    std::string return_current_time_and_date() {
+	auto now = std::chrono::system_clock::now();
+	auto in_time_t = std::chrono::system_clock::to_time_t(now);
+
+	std::stringstream ss;
+	ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d %X");
+	return ss.str();
+    }
+
+    using namespace std;
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+
+	cout << "begin:\t" << return_current_time_and_date() << endl;
+	// payload
+	sleep(2);
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << "duration: " << chrono::duration_cast<chrono::milliseconds>(end-begin).count() << " ms" << endl;
+
+	cout << "end:\t" << return_current_time_and_date() << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    : begin:	2024-10-15 11:50:26
+    : duration: 2000 ms
+    : end:	2024-10-15 11:50:28
+
+  + stub - just return a string
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I.
+    #include "date.h"
+    #include <iostream>
+    #include <chrono>
+    #include <string>
+    #include <sstream>   // stringstream
+    #include <unistd.h>  // sleep
+
+    #if 0
+    std::string return_current_time_and_date() {
+	auto now = std::chrono::system_clock::now();
+	auto today = date::floor<date::days>(now);
+
+	std::stringstream ss;
+	ss << today << ' ' << date::make_time(now - today) << " UTC";
+	return ss.str();
+    }
+    #endif
+
+    #if 0
+    // stub
+    std::string return_current_time_and_date() {
+	return "2024-10-11 17:43";
+    }
+    #endif
+    std::string return_current_time_and_date() {
+	return "2024-10-11 17:43";
+    }
+
+    using namespace std;
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+
+	cout << "begin:\t" << return_current_time_and_date() << endl;
+	// payload
+	sleep(3.0);
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << "duration: " << chrono::duration_cast<chrono::milliseconds>(end-begin).count() << " ms" << endl;
+
+	cout << "end:\t" << return_current_time_and_date() << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    : begin:	2024-10-11 17:43
+    : duration: 3000 ms
+    : end:	2024-10-11 17:43
+
+  + ~chrono::system_clock::now~, ~sleep~
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I.
+    #include "date.h"    // provides a stream insertion operator for system_clock::time_point (in namespace date)
+    #include <iostream>
+    #include <chrono>
+    #include <unistd.h>  // sleep
+
+    using namespace std;
+    using namespace date;
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+	cout << chrono::system_clock::now() << endl;
+	// payload
+	sleep(1);
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << chrono::system_clock::now() << endl;
+	cout << "duration: " << chrono::duration_cast<chrono::milliseconds>(end-begin).count() << " ms" << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    : 2024-10-15 11:50:53.791161370
+    : 2024-10-15 11:50:54.791461514
+    : duration: 1000 ms
+
+  + ~chrono::system_clock::now~, ~sleep~, ~sstringstream~
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I.
+    #include "date.h"    // provides a stream insertion operator for system_clock::time_point (in namespace date)
+    #include <iostream>
+    #include <chrono>
+    #include <sstream>   // stringstream
+    #include <unistd.h>  // sleep
+
+    using namespace std;
+    using namespace date;
+
+    std::string now() {
+	stringstream ss;
+	ss << chrono::system_clock::now();
+
+	return ss.str();
+    }
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+	cout << now() << endl;
+	// payload
+	sleep(1);
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << now() << endl;
+	cout << "duration: " << chrono::duration_cast<chrono::nanoseconds>(end-begin).count() << " ns" << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    : 2024-10-15 11:51:01.224202877
+    : 2024-10-15 11:51:02.224406902
+    : duration: 1000203029 ns
+
+- using ~thread::sleep_for~
+  
+  + ~chrono::system_clock::now~, ~sleep~, ~sstringstream~
+
+    Source: https://stackoverflow.com/questions/4184468/sleep-for-milliseconds 
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I.
+    #include "date.h"    // provides a stream insertion operator for system_clock::time_point (in namespace date)
+    #include <iostream>
+    #include <chrono>
+    #include <thread>
+    #include <sstream>   // stringstream
+
+    using namespace std;
+    using namespace date;
+
+    std::string now() {
+	stringstream ss;
+	ss << chrono::system_clock::now();
+
+	return ss.str();
+    }
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+	cout << now() << endl;
+	// payload
+	this_thread::sleep_for(std::chrono::milliseconds(10));
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << now() << endl;
+	cout << "duration: " << chrono::duration_cast<chrono::milliseconds>(end-begin).count() << " ms" << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    : 2024-10-11 22:19:24.492533091
+    : 2024-10-11 22:19:24.502661288
+    : duration: 10 ms
+    
+  + ~chrono::system_clock::now~, ~sleep~, ~sstringstream~, ~chrono_literals~
+
+    Source: https://stackoverflow.com/questions/4184468/sleep-for-milliseconds 
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I.
+    #include "date.h"    // provides a stream insertion operator for system_clock::time_point (in namespace date)
+    #include <iostream>
+    #include <chrono>
+    #include <thread>
+    #include <sstream>   // stringstream
+
+    using namespace std;
+    using namespace std::chrono_literals;
+    using namespace date;
+
+    std::string now() {
+	stringstream ss;
+	ss << chrono::system_clock::now();
+
+	return ss.str();
+    }
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+	cout << now() << endl;
+	// payload
+	this_thread::sleep_for(123ms);
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << now() << endl;
+	cout << "duration: " << chrono::duration_cast<chrono::milliseconds>(end-begin).count() << " ms" << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    : 2024-10-11 22:22:39.978147178
+    : 2024-10-11 22:22:40.101264759
+    : duration: 123 ms
+
+- using ~thread::sleep_for~
+  
+  + [ *FAILURE* ]: ~chrono::system_clock::now~, ~sleep~, ~sstringstream~
+
+    Source:
+	- https://stackoverflow.com/questions/17223096/outputting-date-and-time-in-c-using-stdchrono
+	- https://stackoverflow.com/questions/4184468/sleep-for-milliseconds 
+
+    "Currently, only MSVC has implemented ~std::format~. The calendar and timezone additions to chrono are currently "partially"
+    implemented by Clang and GCC, but check here for the updated status: https://en.cppreference.com/w/cpp/compiler_support. 
+    For more information about the ~chrono~ library, read here: https://en.cppreference.com/w/cpp/chrono.
+
+    #+begin_src C++ :exports both :results output :flags -std=c++20 :flags -I. :tangle ./foo.cpp
+    #include "date.h"    // provides a stream insertion operator for system_clock::time_point (in namespace date)
+    #include <iostream>
+    #include <chrono>
+    #include <format>
+    #include <thread>
+
+    using namespace std;
+    using namespace date;
+
+    std::string now() {
+	auto const time = chrono::current_zone() -> to_local(chrono::system_clock::now());
+
+	return format("{:%Y-%m-%d %X}", time);
+    }
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+	cout << now() << endl;
+	// payload
+	this_thread::sleep_for(std::chrono::milliseconds(10));
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << now() << endl;
+	cout << "duration: " << chrono::duration_cast<chrono::milliseconds>(end-begin).count() << " ms" << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    
+  + ~chrono::system_clock::now~, ~sleep~, ~sstringstream~, ~chrono_literals~
+
+    Source: https://stackoverflow.com/questions/4184468/sleep-for-milliseconds 
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I.
+    #include "date.h"    // provides a stream insertion operator for system_clock::time_point (in namespace date)
+    #include <iostream>
+    #include <chrono>
+    #include <thread>
+    #include <sstream>   // stringstream
+
+    using namespace std;
+    using namespace std::chrono_literals;
+    using namespace date;
+
+    std::string now() {
+	stringstream ss;
+	ss << chrono::system_clock::now() << " (UTC+0)";
+
+	return ss.str();
+    }
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+	cout << "begin:\t" << now() << endl;
+	// payload
+	this_thread::sleep_for(123ms);
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << "end:\t" << now() << endl;
+	cout << "duration: " << chrono::duration_cast<chrono::nanoseconds>(end-begin).count() << " ns" << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+    : begin:	2024-10-13 16:13:29.769547153 (UTC+0)
+    : end:	2024-10-13 16:13:29.892701381 (UTC+0)
+    : duration: 123173245 ns
+
+*** TODO disk stats [never implemented - the following is a sketch only]
+Source:
+- StackOverflow: /How to find out throughput and read performance of SSD from a C++ application?/
+  + https://stackoverflow.com/questions/78775771/how-to-find-out-throughput-and-read-performance-of-ssd-from-a-c-application
+    
+Points:
+
+- using ~thread::sleep_for~
+  
+  + ~chrono::system_clock::now~, ~sleep~, ~sstringstream~, ~chrono_literals~
+
+    Source: https://stackoverflow.com/questions/4184468/sleep-for-milliseconds 
+
+    #+begin_src C++ :exports both :results output :flags -std=c++11 :flags -I.
+    #include "date.h"    // provides a stream insertion operator for system_clock::time_point (in namespace date)
+    #include <iostream>
+    #include <chrono>
+    #include <thread>
+    #include <sstream>   // stringstream
+
+    using namespace std;
+    using namespace std::chrono_literals;
+    using namespace date;
+
+    DiskStats getDiskStats(const std::string& device_name) {
+	std::ifstream file("/proc/diskstats");
+	std::string line;
+	DiskStats stats = {};
+
+	while (std::getline(file, line)) {
+	    std::istringstream ss(line);
+	    std::string device;
+	    unsigned long dummy;
+	    ss >> dummy >> dummy >> device;
+
+	    if (device == device_name) {
+		ss >> stats.reads_completed >> stats.reads_merged >> stats.sectors_read >> stats.time_reading
+		>> stats.writes_completed >> stats.writes_merged >> stats.sectors_written >> stats.time_writing;
+		break;
+	    }
+	}
+
+	return stats;
+    }
+
+    void getSSDUtil(const DiskStats& before, const DiskStats& after, double duration_us) {
+	DiskStats diff = after - before;
+	double sectors_read = diff.sectors_read;
+	double sector_size = 512; // Assume 512 bytes per sector
+	double bytes_read = sectors_read * sector_size;
+	double throughput = bytes_read / (duration_us / 1e6); // bytes per second
+
+	spdlog::info("Sectors read: {}", sectors_read);
+	spdlog::info("Bytes read: {}", bytes_read);
+	spdlog::info("Throughput: {} B/s", throughput);
+    }
+
+    std::string now() {
+	stringstream ss;
+	ss << chrono::system_clock::now();
+	ss << " (UTC+0)";
+
+	return ss.str();
+    }
+
+    int main() {
+	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+	cout << "begin:\t" << now() << endl;
+	// payload
+	this_thread::sleep_for(123ms);
+	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+	cout << "end:\t" << now() << endl;
+	cout << "duration: " << chrono::duration_cast<chrono::nanoseconds>(end-begin).count() << " ns" << endl;
+
+	return 0;
+    }
+    #+end_src 
+
+    #+RESULTS:
+

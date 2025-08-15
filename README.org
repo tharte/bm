@@ -17,12 +17,10 @@
 
 #+startup:       overview
 
-Just a reference (for Bibtex): \cite{Baxter-Rennie:96}.
-
 * set-up                                                           :noexport:
 ** bash
 #+begin_src bash :session *bash* :exports both :results output :eval no
-root=/home/tharte/dot/projects/problems && cd $root
+root=/home/tharte/dot/projects/bm && cd $root
 #+end_src 
 
 * C/C++
@@ -78,7 +76,7 @@ Points:
   + bash
 
     #+begin_src bash :session *bash* :exports both :results output :eval no
-    folder=/home/tharte/dot/projects/problems/src/c++/benchmarking
+    folder=/home/tharte/dot/projects/bm
     #+end_src
 
     #+RESULTS:
@@ -88,14 +86,14 @@ Points:
   + stock of FIX messages
 
     #+begin_src bash :session *bash* :exports both :results output :eval no
-    filename=/home/tharte/dot/finance/fixed-income/trading/fix/data/fix-samples.txt
+    filename=$folder/fix-samples.txt
 
     cp -p $filename $folder && cat $folder/fix-samples.txt | grep '^8=' | wc -l
     #+end_src
 
     #+RESULTS:
     : 
-    : tharte@niknak:~/dot/projects/problems$ 9
+    : tharte@niknak:~/dot/projects/bm 9
 
     #+begin_src bash :session *bash* :exports both :results output :eval no
     filename=$folder/fix-samples.txt
@@ -105,7 +103,7 @@ Points:
 
     #+RESULTS:
     : 
-    : tharte@niknak:~/dot/projects/problems$ 9 fix.log
+    : tharte@niknak:~/dot/projects/bm 9 fix.log
 
     #+begin_src bash :session *bash* :exports both :results output :eval no
     filename=$folder/fix.log
@@ -129,7 +127,7 @@ Points:
 
     #+RESULTS:
     : 
-    : tharte@niknak:~/dot/projects/problems$ 1000000
+    : tharte@niknak:~/dot/projects/bm 1000000
 
   + we now have a numbered, million-line file ~test2.log~
 

@@ -2292,28 +2292,51 @@ Points:
   
   + ~chrono::steady_clock::now()~, ~sleep~ (units of seconds)
 
-    #+begin_src C++ :exports both :results output :flags -std=c++11
+    #+begin_src C++ :exports both :results output :flags -v -std=c++17
     #include<iostream>
     #include<chrono>     // steady_clock
     #include <unistd.h>  // sleep
 
     using namespace std;
 
+    string comma_ify(unsigned long value) {
+        // Source: https://stackoverflow.com/questions/7276826/format-number-with-commas-in-c
+        auto s = std::to_string(value);
+        int n = s.length() - 3;
+        int end = (value >= 0) ? 0 : 1; // Support for negative numbers
+        while (n > end) {
+            s.insert(n, ",");
+            n -= 3;
+        }
+        return s;
+    }
+
     int main() {
-	chrono::steady_clock::time_point begin = chrono::steady_clock::now();
-	// you can't do this:
-	// cout << "begin: " << begin << endl;
-	sleep(2);   
-	chrono::steady_clock::time_point end = chrono::steady_clock::now();
+        {   /* chrono::steady_clock */ 
+            chrono::steady_clock::time_point begin = chrono::steady_clock::now();
+            // you can't do this:
+            // cout << "begin: " << begin << endl;
+            sleep(2);   
+            chrono::steady_clock::time_point end = chrono::steady_clock::now();
 
-	cout << "duration: " << chrono::duration_cast<chrono::milliseconds>(end-begin).count() << " ms" << endl;
+            cout << "duration: " << comma_ify( chrono::duration_cast<chrono::milliseconds>(end-begin).count() ) << " ms [steady_clock]" << endl;
+        }
 
-	return 0;
+        {   /* chrono::system_clock */ 
+            chrono::system_clock::time_point begin = chrono::system_clock::now();
+            sleep(2);   
+            chrono::system_clock::time_point end = chrono::system_clock::now();
+
+            cout << "duration: " << comma_ify( chrono::duration_cast<chrono::milliseconds>(end-begin).count() ) << " ms [system_clock]" << endl;
+        }
+
+        return 0;
     }
     #+end_src 
 
     #+RESULTS:
-    : duration: 2000 ms
+    : duration: 2,000 ms [steady_clock]
+    : duration: 2,000 ms [system_clock]
 
   + ~chrono::system_clock::now()~, ~sleep~, ~put_time~, ~localtime~ 
 

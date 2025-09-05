@@ -140,7 +140,7 @@ Points:
 
 - ~dd~ - for comparison
 
-  + use ~if=/dev/urandom~ (whita's run with ~nohup~) to create ~o.bin~
+  + use ~if=/dev/urandom~ (run with ~nohup~) to create ~o.bin~
 
     #+begin_src bash :session *bash* :exports both :results output :eval no
     ls -lh $folder/test.log
